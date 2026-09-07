@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 )
 
@@ -92,7 +93,7 @@ func (r *Router) Route(
 	// Step 2–4: filter candidates.
 	candidates := r.filterCandidates(ctx, runtimes, tier)
 
-	// Step 5: session affinity — reuse pinned model if still valid and same tier.
+	// Step 5: session affinity — reuse pinned model if still valid and same tier or higher (sticky escalation).
 	if pin := r.session.Get(ctx, meta.IssueID, meta.SessionID); pin != nil {
 		if pin.Tier == tier && r.candidateExists(candidates, pin.RuntimeID, pin.Model) {
 			r.session.Refresh(ctx, meta.IssueID, meta.SessionID)
@@ -106,6 +107,22 @@ func (r *Router) Route(
 			}
 			r.writeLog(ctx, result, meta)
 			return result
+		}
+		if tierRank(pin.Tier) > tierRank(tier) {
+			pinnedTierCandidates := r.filterCandidates(ctx, runtimes, pin.Tier)
+			if r.candidateExists(pinnedTierCandidates, pin.RuntimeID, pin.Model) {
+				r.session.Refresh(ctx, meta.IssueID, meta.SessionID)
+				result := RoutingResult{
+					RuntimeID:   pin.RuntimeID,
+					Model:       pin.Model,
+					Tier:        pin.Tier,
+					MatchedRule: matchedRule + "+session_pin_escalated",
+					LatencyMs:   time.Since(start).Milliseconds(),
+					Status:      "ok",
+				}
+				r.writeLog(ctx, result, meta)
+				return result
+			}
 		}
 	}
 
@@ -275,32 +292,54 @@ func (r *Router) fallback(_ context.Context, defaultModel, matchedRule string, s
 	}
 }
 
-func (r *Router) writeLog(ctx context.Context, result RoutingResult, meta TaskMeta) {
+func sanitizeLogField(s string, maxLen int) string {
+	if len(s) > maxLen {
+		s = s[:maxLen]
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if r == '\n' || r == '\r' || r == '\t' || r == 0 {
+			b.WriteByte(' ')
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func (r *Router) writeLog(_ context.Context, result RoutingResult, meta TaskMeta) {
 	if r.routingLogFn == nil {
 		return
 	}
+	taskID := meta.TaskID
+	if taskID == "" {
+		taskID = meta.IssueID
+	}
 	entry := RoutingLogEntry{
-		TaskID:            meta.IssueID, // reuse until task-id is threaded through
-		IssueID:           meta.IssueID,
-		SessionID:         meta.SessionID,
-		RuntimeID:         result.RuntimeID,
-		ChosenModel:       result.Model,
+		TaskID:            sanitizeLogField(taskID, 64),
+		IssueID:           sanitizeLogField(meta.IssueID, 64),
+		SessionID:         sanitizeLogField(meta.SessionID, 64),
+		RuntimeID:         sanitizeLogField(result.RuntimeID, 64),
+		ChosenModel:       sanitizeLogField(result.Model, 128),
 		Tier:              string(result.Tier),
-		MatchedRule:       result.MatchedRule,
+		MatchedRule:       sanitizeLogField(result.MatchedRule, 128),
 		ToolChainExpected: meta.WillUseMCPTools,
 		FallbackUsed:      result.FallbackUsed,
 		LatencyMs:         int(result.LatencyMs),
 		Status:            result.Status,
 	}
 	// Fire-and-forget so routing evidence never adds latency to task dispatch.
+	// Use an independent timeout context so caller cancellation does not abort the write.
 	go func() {
+		logCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
 		if err := func() (retErr error) {
 			defer func() {
 				if rec := recover(); rec != nil {
 					retErr = fmt.Errorf("routing log panic: %v", rec)
 				}
 			}()
-			r.routingLogFn(ctx, entry)
+			r.routingLogFn(logCtx, entry)
 			return nil
 		}(); err != nil {
 			r.logger.Warn("cerebra: routing log write failed", "error", err)
@@ -334,3 +373,16 @@ type RoutingLogEntry struct {
 // ErrNoRoute is returned by integration tests when no model can be selected
 // and no default is provided.
 var ErrNoRoute = errors.New("cerebra: no eligible model candidate")
+
+// InvalidateSession clears any session pin for the given issue and session ID.
+func (r *Router) InvalidateSession(ctx context.Context, issueID, sessionID string) {
+	if r.session != nil {
+		r.session.Delete(ctx, issueID, sessionID)
+	}
+}
+
+// UnavailabilityStore returns the underlying UnavailabilityStore.
+func (r *Router) UnavailabilityStore() *UnavailabilityStore {
+	return r.unavail
+}
+
