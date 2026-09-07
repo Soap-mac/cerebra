@@ -7451,21 +7451,44 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if provider == "opencode" {
 		idleWatchdogTimeout = d.cfg.OpenCodeIdleWatchdog
 	}
-	if d.cerebraRouter != nil {
+	isCerebraActive := false
+	var mcpOverlayBytes []byte
+	skillsCount := 0
+	if task.Agent != nil {
+		mcpOverlayBytes = task.Agent.McpConfig
+		for _, sk := range task.Agent.Skills {
+			if sk.Name == "cerebra-routing" {
+				isCerebraActive = true
+			} else {
+				skillsCount++
+			}
+		}
+		for _, ref := range task.Agent.SkillRefs {
+			if ref.Name == "cerebra-routing" {
+				isCerebraActive = true
+			} else {
+				skillsCount++
+			}
+		}
+	}
+
+	if isCerebraActive && d.cerebraRouter != nil {
 		var connectedAppNames []string
 		for _, app := range task.ConnectedApps {
 			connectedAppNames = append(connectedAppNames, app.ServerName)
 		}
 		meta := cerebra.TaskMeta{
-			WillUseMCPTools: detectMCPUsage(nil, connectedAppNames),
+			TaskID:          task.ID,
+			WillUseMCPTools: detectMCPUsage(mcpOverlayBytes, connectedAppNames, len(task.PluginHookTools), len(task.RemoteMCPConnections), skillsCount),
 			IssueID:         task.IssueID,
 			SessionID:       task.ChatSessionID,
 		}
 		var runtimes []cerebra.RuntimeEntry
 		if task.RuntimeID != "" {
+			runtimeCmd := agent.NewCommand(entry.Path, profileFixedArgs)
 			runtimes = append(runtimes, cerebra.RuntimeEntry{
 				RuntimeID: task.RuntimeID,
-				TierMap:   nil,
+				TierMap:   deriveDynamicRuntimeTierMap(ctx, provider, runtimeCmd, d.unavailStore, task.RuntimeID),
 			})
 		}
 		model = routeBeforeDispatch(ctx, d.cerebraRouter, prompt, meta, runtimes, model)
