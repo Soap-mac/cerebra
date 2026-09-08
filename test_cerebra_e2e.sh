@@ -24,8 +24,8 @@ header() {
   log "${BOLD}${BLUE}║  $1${RESET}"
   log "${BOLD}${BLUE}╚════════════════════════════════════════════════════════════════════════════╝${RESET}"
 }
-pass()   { ((PASS++)); ((TOTAL++)); log "  ${GREEN}✅ PASS${RESET}  $1"; }
-fail()   { ((FAIL++)); ((TOTAL++)); log "  ${RED}❌ FAIL${RESET}  $1"; }
+pass()   { ((++PASS)); ((++TOTAL)); log "  ${GREEN}✅ PASS${RESET}  $1"; }
+fail()   { ((++FAIL)); ((++TOTAL)); log "  ${RED}❌ FAIL${RESET}  $1"; }
 info()   { log "  ${CYAN}ℹ${RESET}   $1"; }
 step()   { log "\n${YELLOW}▶ $1${RESET}"; }
 cli_box() {
@@ -57,37 +57,32 @@ else
   fail "Multica CLI not found"
 fi
 
-step "Checking plugin command capabilities"
-cli_box "multica install --help"
-INSTALL_HELP=$("${SCRIPT_DIR}/bin/multica" install --help 2>&1 || echo "")
-if echo "$INSTALL_HELP" | grep -qi "install a plugin"; then
-  pass "'multica install' command registered in CLI"
+step "Checking skill import command capabilities"
+cli_box "multica skill import --help"
+SKILL_HELP=$("${SCRIPT_DIR}/bin/multica" skill import --help 2>&1 || echo "")
+if echo "$SKILL_HELP" | grep -qi "Import a skill"; then
+  pass "'multica skill import' command registered in CLI"
 else
-  fail "'multica install' command missing"
+  fail "'multica skill import' command missing"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PHASE 2: Live Model Discovery across OpenCode & Ollama Catalogs
+# PHASE 2: Dynamic Model Catalog & Tier Classification
 # ─────────────────────────────────────────────────────────────────────────────
-header "PHASE 2 — Live Dynamic Model Discovery (OpenCode + Local Catalogs)"
+header "PHASE 2 — Dynamic Model Catalog & Tier Classification"
 
-step "Running dynamic model discovery & classification engine"
-cli_box "go run ./cmd/test_cerebra_cli/"
+step "Running Cerebra catalog and tier-map verification"
+cli_box "go test -v ./internal/cerebra/ -run TestBuildTierMapFromCatalog"
 cd "${SCRIPT_DIR}/server"
-DISCOVERY_OUT=$(go run ./cmd/test_cerebra_cli/ 2>&1)
+
+DISCOVERY_OUT=$(go test -v ./internal/cerebra/ -run TestBuildTierMapFromCatalog -count=1 2>&1)
 echo "$DISCOVERY_OUT" | tee -a "$LOG_FILE"
 
-if echo "$DISCOVERY_OUT" | grep -q "Total Live Models Discovered"; then
-  MODELS_COUNT=$(echo "$DISCOVERY_OUT" | grep "Total Live Models Discovered" | awk '{print $5}')
-  pass "Dynamic Discovery: Discovered ${MODELS_COUNT} live models across provider catalogs"
+if echo "$DISCOVERY_OUT" | grep -q "^--- PASS: TestBuildTierMapFromCatalog"; then
+  pass "Dynamic TierMap generation and model classification verified"
 else
-  fail "Model discovery failed"
-fi
-
-if echo "$DISCOVERY_OUT" | grep -q "100% Automated Multi-Provider Dynamic Discovery & Routing Succeeded"; then
-  pass "Dynamic TierMap generation and live routing verification successful"
-else
-  fail "Dynamic TierMap generation failed"
+  fail "Cerebra catalog and TierMap verification failed"
+  exit 1
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
