@@ -144,6 +144,7 @@ core_tests=(
   "TestSessionStore_TTL_And_Escalation|Session Store Expiration & In-Memory TTL Re-routing"
   "TestHardCase_RateLimitAndContextWindowStress|Concurrency Stress: Rate-Limit Failover & Context Window Escalation"
   "TestHardCase_CrossRuntimeFailover|Cross-Runtime Failover & Graceful Fallback"
+  "TestRoutingLatencyUnder1ms|Routing Latency: Average Route() latency stays below 1ms"
 )
 
 for ct in "${core_tests[@]}"; do

@@ -2,6 +2,7 @@ package cerebra
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -359,5 +360,89 @@ func TestHardCase_CrossRuntimeFailover(t *testing.T) {
 	res2 := router.Route(ctx, "debug the database connection", TaskMeta{}, runtimes, "default-model")
 	if res2.RuntimeID != "rt-opencode-backup" || res2.Model != "opencode/nemotron-3.5-lightning-free" {
 		t.Fatalf("expected backup opencode runtime standard model, got runtime=%s, model=%s", res2.RuntimeID, res2.Model)
+	}
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 7: Routing Latency Guard
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestRoutingLatencyUnder1ms(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	classifier := HeuristicClassifier{}
+	policy := &Policy{}
+	session := NewSessionStore(2 * time.Hour)
+	unavail := NewUnavailabilityStore(time.Hour)
+	router := NewRouter(classifier, policy, session, unavail, logger, nil)
+
+	runtimes := []RuntimeEntry{
+		{
+			RuntimeID: "rt-latency",
+			TierMap: TierMap{
+				TierSimple:   "opencode/mimo-v2.5-free",
+				TierStandard: "opencode/nemotron-3.5-lightning-free",
+				TierHeavy:    "opencode/nemotron-3-ultra-free",
+			},
+		},
+	}
+
+	meta := TaskMeta{
+		IssueID: "latency-guard",
+	}
+
+	const (
+		warmupIterations = 100
+		measureIterations = 10000
+		maxLatency        = 1 * time.Millisecond
+	)
+
+	// Warm up the routing path so the measurement is not dominated by
+	// one-time setup such as allocations and cold caches.
+	for i := 0; i < warmupIterations; i++ {
+		meta.TaskID = "warmup"
+		meta.SessionID = "warmup"
+		router.Route(ctx, "debug the database connection", meta, runtimes, "default-model")
+	}
+
+	// Use a fresh issue/session for every measurement so session pinning
+	// does not turn this into a different, artificially cheap code path.
+	start := time.Now()
+
+	for i := 0; i < measureIterations; i++ {
+		meta.TaskID = fmt.Sprintf("latency-task-%d", i)
+		meta.IssueID = fmt.Sprintf("latency-issue-%d", i)
+		meta.SessionID = fmt.Sprintf("latency-session-%d", i)
+
+		result := router.Route(
+			ctx,
+			"debug the database connection",
+			meta,
+			runtimes,
+			"default-model",
+		)
+
+		if result.Status != "ok" {
+			t.Fatalf("routing iteration %d returned unexpected status %q", i, result.Status)
+		}
+	}
+
+	elapsed := time.Since(start)
+	averageLatency := elapsed / measureIterations
+
+	t.Logf(
+		"routing latency: total=%s iterations=%d average=%s",
+		elapsed,
+		measureIterations,
+		averageLatency,
+	)
+
+	if averageLatency >= maxLatency {
+		t.Fatalf(
+			"routing latency requirement violated: average=%s, required < %s",
+			averageLatency,
+			maxLatency,
+		)
 	}
 }
